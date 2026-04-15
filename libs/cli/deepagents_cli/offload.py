@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import get_buffer_string
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages.utils import convert_to_messages, count_tokens_approximately
 
 from deepagents_cli.config import create_model
 from deepagents_cli.textual_adapter import format_token_count
@@ -83,6 +83,50 @@ class OffloadModelError(Exception):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalize_messages(messages: list[Any]) -> list[Any]:
+    """Convert dict-serialized messages to LangChain `BaseMessage` objects.
+
+    Some providers reject raw dict payloads like
+    `{"type": "human", ...}` that other providers silently accept.
+    Normalizing up front keeps `/offload` provider-agnostic.
+
+    Args:
+        messages: Raw messages from thread state.
+
+    Returns:
+        List of proper `BaseMessage` instances.
+    """
+    if not messages:
+        return messages
+    if not any(isinstance(m, dict) for m in messages):
+        return messages
+    return list(convert_to_messages(messages))
+
+
+def _normalize_prior_event(
+    prior_event: SummarizationEvent | None,
+) -> SummarizationEvent | None:
+    """Convert a dict-serialized summary message inside a prior event.
+
+    Args:
+        prior_event: Existing summarization event from state.
+
+    Returns:
+        Event with `summary_message` as a `BaseMessage`, or `None`.
+    """
+    if prior_event is None:
+        return None
+    summary_message = prior_event.get("summary_message")
+    if not isinstance(summary_message, dict):
+        return prior_event
+    converted = convert_to_messages([summary_message])
+    if not converted:
+        return prior_event
+    normalized = dict(prior_event)
+    normalized["summary_message"] = converted[0]  # ty: ignore[typeddict-item]
+    return normalized  # ty: ignore[return-value]
 
 
 def format_offload_limit(
@@ -285,6 +329,9 @@ async def perform_offload(
         keep=defaults["keep"],
         trim_tokens_to_summarize=None,
     )
+
+    messages = _normalize_messages(messages)
+    prior_event = _normalize_prior_event(prior_event)
 
     # Rebuild the message list the model would see, accounting for
     # any prior offload
